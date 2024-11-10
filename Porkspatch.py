@@ -4,14 +4,30 @@ import string
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import Image, messagebox, ttk
-from tkinter import filedialog
+from tkinter import messagebox, ttk, filedialog
+from tkinter import simpledialog
+from tkinter.simpledialog import askstring
 import webbrowser
 import winreg
+import psutil
+import platform
 
-version = "1.000"
+version = "2"
 drive_vars = []
 divider = "__________________________________________________________________________________________________________________________________________________________________________________________________"
+#global setting_status
+#setting_status = "Idle"
+
+# Global declarations for widgets
+root = None
+notebook = None
+user_list = None
+entry_username = None
+entry_password = None
+network_tree = None
+socket = None
+entry_ping_ip = None
+startup_listbox = None
 
 def is_admin():
     """
@@ -64,6 +80,72 @@ def create_tooltip(widget, text):
 
     widget.bind('<Enter>', enter)
     widget.bind('<Leave>', leave)
+    
+def get_processor_name():
+    # Try to get the processor name using 'wmic'
+    try:
+        processor_name = subprocess.check_output("wmic cpu get name").decode().split('\n')[1].strip()
+        return processor_name
+    except Exception as e:
+        return f"Error retrieving processor info: {e}"
+
+def get_ram_amount():
+    # Get the total physical RAM
+    ram = psutil.virtual_memory().total / (1024 ** 3)  # Convert bytes to GB
+    return f"{ram:.2f} GB"
+
+def get_gpu_name():
+    # Try to get the GPU name using 'wmic' or other methods
+    try:
+        gpu_info = subprocess.check_output("wmic path win32_videocontroller get caption").decode().split('\n')[1].strip()
+        return gpu_info
+    except Exception as e:
+        return f"Error retrieving GPU info: {e}"
+
+def get_storage_info():
+    # Get information about all drives
+    partitions = psutil.disk_partitions()
+    storage_info = []
+    for partition in partitions:
+        usage = psutil.disk_usage(partition.mountpoint)
+        storage_info.append(f"{partition.device}: {usage.total / (1024 ** 3):.2f} GB")
+    return "\n    ".join(storage_info)
+
+def get_battery_health():
+    # Get battery health percentage if on laptop
+    battery = psutil.sensors_battery()
+    if battery:
+        return f"{battery.percent}%"
+    else:
+        return "Not a laptop or battery not detected"
+
+def get_windows_version():
+    # Get the version of Windows installed
+    print(f"WINDOWS VERSION: {platform.version()}")
+    return platform.version()
+
+def get_activation_status():
+    # Query the Windows registry for activation status (e.g. license key presence)
+    try:
+        registry_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        value = winreg.QueryValueEx(registry_key, "ProductId")[0]
+        if value:
+            return "Activated"
+        else:
+            return "Not Activated"
+    except Exception as e:
+        return "Error retrieving activation status"
+
+# Collect system information
+processor = get_processor_name()
+ram = get_ram_amount()
+gpu = get_gpu_name()
+storage = get_storage_info()
+battery_health = get_battery_health()
+windows_version = get_windows_version()
+activation_status = get_activation_status()
+
+
 
 def set_regkey(hkey: winreg.HKEYType, subkey: string, newvalue: string, datatype: string, inverse: bool, silent: bool):
     global checkbox_variable
@@ -366,6 +448,32 @@ def get_disable_auto_updates():
         messagebox.showerror("Porkspatch", f"Error reading NoAutoUpdate: {e}")
         return False
 
+def set_disable_activate_windows_watermark():
+    # Set or Unset DisableActivateWindowsWatermark registry key based on the checkbox variable.
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE)
+        value = 0 if disable_activate_windows_watermark_value.get() else 1
+        winreg.SetValueEx(key, "DisableActivateWindowsWatermark", 0, winreg.REG_DWORD, value)
+        winreg.CloseKey(key)
+        messagebox.showinfo("Porkspatch", f"Disable Activate Windows Watermark set to {value}")
+    except Exception as e:
+        messagebox.showerror("Porkspatch", f"Error setting Disable Windows Auto Update: {e}")
+
+def get_disable_activate_windows_watermark():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_READ)
+        value, _ = winreg.QueryValueEx(key, "PaintDesktopVersion")
+        winreg.CloseKey(key)
+        return bool(value)
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        messagebox.showerror("Porkspatch", "Permission denied. Please run as administrator.")
+        return False
+    except Exception as e:
+        messagebox.showerror("Porkspatch", f"Error reading DisableActivateWindowsWatermark: {e}")
+        return False
+
 def open_twitter():
     webbrowser.open_new("https://twitter.com/PorkyLIVE_")
 
@@ -603,6 +711,321 @@ def browse_new_cmd():
         entry_command.delete(0, tk.END)
         entry_command.insert(0, command)
 
+# Function to retrieve Windows user accounts
+def load_user_accounts():
+    try:
+        # Use PowerShell to get a more immediate update
+        result = subprocess.run(["powershell", "-Command", "Get-WmiObject -Class Win32_UserAccount | Select-Object Name"], capture_output=True, text=True, shell=True)
+        users = result.stdout.splitlines()
+        
+        # Clear the list in the Treeview before loading new data
+        for item in user_list.get_children():
+            user_list.delete(item)
+        
+        # Populate the Treeview with usernames
+        for user in users:
+            username = user.strip()
+            if username:  # Filter out empty lines
+                user_list.insert("", "end", values=(username,))
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load user accounts: {e}")
+
+# Function to handle selection in the user list
+def on_user_select(event):
+    selected_item = user_list.selection()
+    if not selected_item:
+        return
+    
+    # Get the selected username
+    username = user_list.item(selected_item, "values")[0]
+    
+    # Update the username field and clear the password field
+    entry_username.delete(0, tk.END)
+    entry_username.insert(0, username)
+    entry_password.delete(0, tk.END)  # Clear password field
+
+# Function to add a new Windows user account
+def add_user_account():
+    username = entry_username.get().strip()
+    password = entry_password.get().strip()
+    
+    if not username or not password:
+        messagebox.showwarning("Input Error", "Username and password are required.")
+        return
+    
+    try:
+        subprocess.run(["net", "user", username, password, "/add"], check=True, shell=True)
+        messagebox.showinfo("Success", f"User '{username}' added successfully.")
+        load_user_accounts()  # Refresh the user list
+        entry_username.delete(0, tk.END)
+        entry_password.delete(0, tk.END)
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Failed to add user '{username}': {e}")
+
+# Function to delete a selected Windows user account
+def delete_user_account():
+    selected_item = user_list.selection()
+    if not selected_item:
+        messagebox.showwarning("Selection Error", "Please select a user to delete.")
+        return
+
+    username = user_list.item(selected_item, "values")[0]
+    confirm = messagebox.askyesno("Delete User", f"Are you sure you want to delete the user '{username}'?")
+    
+    if confirm:
+        try:
+            subprocess.run(["net", "user", username, "/delete"], check=True, shell=True)
+            messagebox.showinfo("Success", f"User '{username}' deleted successfully.")
+            load_user_accounts()  # Reload the user accounts list
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Error", f"Failed to delete user '{username}': {e}")
+
+# Function to update the password of the selected user
+def update_user_password():
+    selected_item = user_list.selection()
+    if not selected_item:
+        messagebox.showwarning("Selection Error", "Please select a user to update.")
+        return
+    
+    username = user_list.item(selected_item, "values")[0]
+    new_password = entry_password.get().strip()
+    
+    if not new_password:
+        messagebox.showwarning("Input Error", "Password is required to update.")
+        return
+
+    try:
+        subprocess.run(["net", "user", username, new_password], check=True, shell=True)
+        messagebox.showinfo("Success", f"Password for '{username}' updated successfully.")
+        entry_password.delete(0, tk.END)
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Failed to update password for '{username}': {e}")
+
+# Function to retrieve network interfaces and display their details
+# Function to retrieve network interfaces and display their details
+def load_network_interfaces():
+    try:
+        # Clear the treeview before reloading data
+        for item in network_tree.get_children():
+            network_tree.delete(item)
+        
+        # Use 'wmic' to get network adapter details
+        result = subprocess.run(["wmic", "nic", "get", "NetConnectionID,Name,MACAddress,Speed"], 
+                                capture_output=True, text=True, shell=True)
+        lines = result.stdout.splitlines()[1:]  # Ignore header
+
+        for line in lines:
+            details = line.split()
+            if len(details) < 4:
+                continue  # Skip lines that don't contain enough info
+            
+            # Extract relevant information
+            display_name = " ".join(details[:-3])
+            internal_name = details[-3]
+            mac_address = details[-2]
+            speed = details[-1]
+
+            # If the first 18 characters of the display name have at least 5 colons, treat it as the MAC address
+            if display_name[:18].count(":") >= 5:
+                mac_address = display_name[:17]  # Extract the MAC address
+                display_name = display_name[18:]  # Update display name without the MAC address part
+
+            # Convert speed to bits through yottabits (b, Kb, Mb, Gb, Tb, Pb, Eb, Zb, Yb)
+            if speed.isdigit():
+                speed = int(speed)  # Speed is in bits
+                units = ["b", "Kb", "Mb", "Gb", "Tb", "Pb", "Eb", "Zb", "Yb"]
+                index = 0
+                while speed >= 1000 and index < len(units) - 1:
+                    speed /= 1000.0
+                    index += 1
+                speed = f"{speed:.2f} {units[index]}"
+            else:
+                speed = "N/A"
+
+            # Insert network adapter details into the treeview
+            network_tree.insert("", "end", values=(display_name, internal_name, mac_address, speed))
+
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load network interfaces: {e}")
+
+# Function to enable a selected network adapter
+def enable_network_interface():
+    selected_item = network_tree.selection()
+    if not selected_item:
+        messagebox.showwarning("Selection Error", "Please select a network interface to enable.")
+        return
+
+    internal_name = network_tree.item(selected_item, "values")[1]
+    try:
+        subprocess.run(["wmic", "path", "win32_networkadapter", "where", f"NetConnectionID='{internal_name}'", "call", "enable"], check=True, shell=True)
+        messagebox.showinfo("Success", f"Network interface '{internal_name}' enabled successfully.")
+        load_network_interfaces()
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Failed to enable network interface '{internal_name}': {e}")
+
+# Function to disable a selected network adapter
+def disable_network_interface():
+    selected_item = network_tree.selection()
+    if not selected_item:
+        messagebox.showwarning("Selection Error", "Please select a network interface to disable.")
+        return
+
+    internal_name = network_tree.item(selected_item, "values")[1]
+    try:
+        subprocess.run(["wmic", "path", "win32_networkadapter", "where", f"NetConnectionID='{internal_name}'", "call", "disable"], check=True, shell=True)
+        messagebox.showinfo("Success", f"Network interface '{internal_name}' disabled successfully.")
+        load_network_interfaces()
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Failed to disable network interface '{internal_name}': {e}")
+
+# Function to ping a specified IP address
+def ping_ip():
+    ip_address = entry_ping_ip.get()
+    if not ip_address:
+        messagebox.showwarning("Input Error", "Please enter an IP address to ping.")
+        return
+
+    try:
+        result = subprocess.run(["ping", "-n", "1", ip_address], capture_output=True, text=True)
+        if "Reply from" in result.stdout:
+            messagebox.showinfo("Ping Result", f"Successfully reached {ip_address}.")
+        else:
+            messagebox.showinfo("Ping Result", f"Failed to reach {ip_address}.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to ping IP address '{ip_address}': {e}")
+
+# Function to open Command Prompt as Administrator (if the program already has elevated privileges)
+def open_admin_cmd():
+    try:
+        if platform == "win32":
+            # Command to open the Command Prompt with elevated privileges (admin rights)
+            subprocess.Popen("cmd.exe", shell=True)
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Function to handle Shift + F10 key press
+def on_shift_f10(event):
+    open_admin_cmd()
+    
+def list_startup_programs():
+    startup_programs = []
+    
+    try:
+        # Attempt to access both registry keys depending on system architecture
+        reg_key_paths = [
+            r"Software\Microsoft\Windows\CurrentVersion\Run",  # For 32-bit programs
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",  # For 32-bit programs on 64-bit OS
+        ]
+        
+        # Check if the current user has access to HKLM (run as admin)
+        for path in reg_key_paths:
+            try:
+                # Try accessing the registry key
+                reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ)
+                num_values = winreg.QueryInfoKey(reg_key)[1]  # Get the number of values under the key
+                print(f"Found {num_values} entries in the registry key: {path}")
+                
+                # Loop through and fetch all values
+                for i in range(num_values):
+                    program_name, program_path, _ = winreg.EnumValue(reg_key, i)
+                    print(f"Name: {program_name}, Path: {program_path}")
+                    startup_programs.append((program_name, program_path))
+                
+                winreg.CloseKey(reg_key)
+            except Exception as e:
+                print(f"Failed to open registry key at {path}: {e}")
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to retrieve startup programs: {e}")
+    
+    return startup_programs
+
+def add_program_to_startup():
+    # Open file dialog to select an executable
+    program_path = filedialog.askopenfilename(
+        title="Select Program Executable",
+        filetypes=[("Executable Files", "*.exe")]
+    )
+    
+    if program_path:
+        # Normalize the path to ensure all slashes are backslashes
+        program_path = program_path.replace('/', '\\')
+        
+        # Ask for the program name (can be the filename or custom name)
+        program_name = simpledialog.askstring("Program Name", "Enter the name of the program:")
+        
+        if program_name:
+            try:
+                reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_WRITE)
+                winreg.SetValueEx(reg_key, program_name, 0, winreg.REG_SZ, program_path)
+                winreg.CloseKey(reg_key)
+                messagebox.showinfo("Success", "Program added to startup.")
+                refresh_startup_list()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to add program: {e}")
+
+def remove_program_from_startup():
+    selected_program = startup_listbox.curselection()
+    if selected_program:
+        program_name = startup_listbox.get(selected_program)
+        try:
+            reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_WRITE)
+            winreg.DeleteValue(reg_key, program_name)
+            winreg.CloseKey(reg_key)
+            messagebox.showinfo("Success", f"{program_name} has been removed from startup.")
+            refresh_startup_list()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to remove program: {e}")
+    else:
+        messagebox.showwarning("No Selection", "Please select a program to remove.")
+
+def enable_program():
+    selected_program = startup_listbox.curselection()
+    if selected_program:
+        program_name = startup_listbox.get(selected_program)
+        try:
+            reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_WRITE)
+            _, program_path, _ = winreg.EnumValue(reg_key, selected_program[0])
+            winreg.SetValueEx(reg_key, program_name, 0, winreg.REG_SZ, program_path)
+            winreg.CloseKey(reg_key)
+            messagebox.showinfo("Success", f"{program_name} has been enabled.")
+            refresh_startup_list()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to enable program: {e}")
+    else:
+        messagebox.showwarning("No Selection", "Please select a program to enable.")
+
+def disable_program():
+    selected_program = startup_listbox.curselection()
+    if selected_program:
+        program_name = startup_listbox.get(selected_program)
+        try:
+            reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_WRITE)
+            winreg.DeleteValue(reg_key, program_name)  # Removing will effectively disable it.
+            winreg.CloseKey(reg_key)
+            messagebox.showinfo("Success", f"{program_name} has been disabled.")
+            refresh_startup_list()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to disable program: {e}")
+    else:
+        messagebox.showwarning("No Selection", "Please select a program to disable.")
+
+def refresh_startup_list():
+    startup_listbox.delete(0, tk.END)
+    
+    # Fetching the programs and printing them for debugging
+    programs = list_startup_programs()
+    print("Inserting the following programs into the Listbox:")
+    
+    for program in programs:
+        print(f"Inserting program: {program[0]}")
+        startup_listbox.insert(tk.END, program[0])
+
+
+
+
+
+
 
 
 
@@ -617,7 +1040,8 @@ def main():
         ### WINDOW CONFIGURATION ###
         window = tk.Tk()
         window.title("Porkspatch")
-        window.geometry("768x480")
+        window.geometry("1024x640")
+        # window.geometry("1920x1080")
         window.configure(bg="pink")
         window.resizable(False, False)
 
@@ -671,30 +1095,32 @@ def main():
             admin_checker_text = "No administrator privileges... :("
 
         admin_checker = tk.Label(welcome_tab, text=admin_checker_text, font=("Arial", 16))
-        admin_checker.pack(expand=False,anchor='s')
+        admin_checker.pack(expand=False, fill='y', anchor='s')
 
         version_label = tk.Label(welcome_tab, text=f"Version: {version}", font=("Arial", 8), foreground='gray')
         version_label.pack(expand=False,anchor='s')
         create_tooltip(version_label, f"""Username: {os.environ.get("username")}
-        User Directory: {os.environ.get("userprofile")}
-        AppData: {os.environ.get("appdata")}
-        LocalAppData: {os.environ.get("localappdata")}
-        Temp: {os.environ.get("temp")}
-        OneDrive: {os.environ.get("onedrive")}
+User Directory: {os.environ.get("userprofile")}
+AppData: {os.environ.get("appdata")}
+LocalAppData: {os.environ.get("localappdata")}
+Temp: {os.environ.get("temp")}
+OneDrive: {os.environ.get("onedrive")}
 
 Computer: {os.environ.get("computername")}
-        Operating System: {os.environ.get("OS")}
-        Windows Directory: {os.environ.get("windir")}
-        System Drive: {os.environ.get("systemdrive")}
-        System Root: {os.environ.get("systemroot")}
+Operating System: {windows_version}
+Windows Directory: {os.environ.get("windir")}
+System Drive: {os.environ.get("systemdrive")}
+System Root: {os.environ.get("systemroot")}
 
-Processor: {os.environ.get("processor_identifier")}
-        Architecture: {os.environ.get("processor_architecture")}
-        Level: {os.environ.get("processor_level")}
-        Revision: {os.environ.get("processor_revision")}
-        Amount: {os.environ.get("number_of_processors")}
+Processor: {processor}
+RAM: {ram}
+GPU: {gpu}
+Storage:\n    {storage}
+Battery Health: {battery_health}
+Activation Status: {activation_status}
 
-PATH Extensions: {os.environ.get("pathext")}""")
+PATH Extensions: {os.environ.get("pathext")}
+""")
 
         ## GLOBAL SETTINGS TAB ##
         notebook.add(global_tab, text="Global Settings")
@@ -713,6 +1139,9 @@ PATH Extensions: {os.environ.get("pathext")}""")
 
         windows_frame = ttk.LabelFrame(global_tab, text="Windows")
         windows_frame.grid(row=2, column=2, sticky='n')
+
+        visual_frame = ttk.LabelFrame(global_tab, text="Visual")
+        visual_frame.grid(row=3, column=2, sticky='n')
 
         global long_paths_var
         long_paths_var = tk.IntVar(value=int(get_long_paths_enabled()))
@@ -772,6 +1201,16 @@ PATH Extensions: {os.environ.get("pathext")}""")
         create_tooltip(disable_no_auto_update, """This will disable the automatic downloading and installing of Windows Updates.
         > WARNING: This obviously creates a security risk if Windows Updates are ignored altogether.""")
 
+        global disable_activate_windows_watermark_value
+        disable_activate_windows_watermark_value = tk.IntVar(value=int(get_disable_activate_windows_watermark()))
+        disable_activate_windows_watermark = ttk.Checkbutton(visual_frame, text="Disable Activate Windows Watermark", variable=disable_activate_windows_watermark_value, command=set_disable_activate_windows_watermark)
+        disable_activate_windows_watermark.pack(padx=10, pady=1, anchor='w')
+        create_tooltip(disable_activate_windows_watermark, """This will remove the 'Activate Windows' watermark if disabled, and will display it when enabled.""")
+
+#        setting_status_bar_value = tk.StringVar(value=setting_status)
+#        setting_status_bar = tk.Label(global_tab, textvariable=setting_status_bar_value)
+#        setting_status_bar.grid(row=10,column=1,columnspan=3,sticky='nsew')
+        
         ## BOOT SETTINGS TAB ##
         #notebook.add(boot_tab, text="Boot")
         
@@ -897,6 +1336,116 @@ PATH Extensions: {os.environ.get("pathext")}""")
         drive_divider = tk.Label(drives_tab, text=divider, foreground='light gray')
         drive_divider.grid(row=4, columnspan=26)
 
+        # --- User Accounts Tab ---
+        global user_list, entry_username, entry_password
+        user_accounts_tab = ttk.Frame(notebook)
+        notebook.add(user_accounts_tab, text="User Accounts")
+
+        # Display List of Users
+        user_list_frame = ttk.LabelFrame(user_accounts_tab, text="Windows User Accounts")
+        user_list_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Create Treeview to display user accounts
+        user_list = ttk.Treeview(user_list_frame, columns=("username",), show="headings")
+        user_list.heading("username", text="Username")
+        user_list.pack(fill='both', expand=True)
+    
+        # Bind the Treeview selection event to on_user_select
+        user_list.bind("<<TreeviewSelect>>", on_user_select)
+
+        # Refresh Button to reload users
+        refresh_button = ttk.Button(user_accounts_tab, text="Refresh List", command=load_user_accounts)
+        refresh_button.pack(pady=5)
+
+        # Add User Frame
+        add_user_frame = ttk.LabelFrame(user_accounts_tab, text="Add/Edit User")
+        add_user_frame.pack(fill='x', padx=10, pady=10)
+
+        # Username Entry
+        ttk.Label(add_user_frame, text="Username:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        entry_username = ttk.Entry(add_user_frame)
+        entry_username.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+        # Password Entry
+        ttk.Label(add_user_frame, text="Password:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        entry_password = ttk.Entry(add_user_frame, show="*")
+        entry_password.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        # Buttons for account actions
+        ttk.Button(add_user_frame, text="Add User", command=add_user_account).grid(row=2, column=0, padx=5, pady=10, sticky="e")
+        ttk.Button(add_user_frame, text="Update Password", command=update_user_password).grid(row=2, column=1, padx=5, pady=10, sticky="w")
+        ttk.Button(user_accounts_tab, text="Delete User", command=delete_user_account).pack(pady=5)
+
+        # Initial load of user accounts
+        load_user_accounts()
+
+        ## NETWORK INTERFACE TAB ##
+        global network_tree, entry_ping_ip
+
+        network_tab = ttk.Frame(notebook)
+        notebook.add(network_tab, text="Network Interfaces")
+
+        # Network Treeview for showing network details
+        network_tree_frame = ttk.LabelFrame(network_tab, text="Network Interfaces")
+        network_tree_frame.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Define columns for the treeview
+        columns = ("display_name", "internal_name", "mac_address", "speed")
+        network_tree = ttk.Treeview(network_tree_frame, columns=columns, show="headings")
+        network_tree.heading("display_name", text="Display Name")
+        network_tree.heading("internal_name", text="Internal Name")
+        network_tree.heading("mac_address", text="MAC Address")
+        network_tree.heading("speed", text="Speed")
+        network_tree.pack(fill='both', expand=True)
+
+        # Buttons to enable/disable selected interface
+        button_frame = ttk.Frame(network_tab)
+        button_frame.pack(pady=10)
+
+        enable_button = ttk.Button(button_frame, text="Enable Interface", command=enable_network_interface)
+        enable_button.grid(row=0, column=0, padx=5)
+
+        disable_button = ttk.Button(button_frame, text="Disable Interface", command=disable_network_interface)
+        disable_button.grid(row=0, column=1, padx=5)
+
+        # Ping section
+        ping_frame = ttk.LabelFrame(network_tab, text="Ping IP")
+        ping_frame.pack(fill='x', padx=10, pady=10)
+
+        tk.Label(ping_frame, text="IP Address:").grid(row=0, column=0, padx=5, pady=5)
+        entry_ping_ip = tk.Entry(ping_frame)
+        entry_ping_ip.grid(row=0, column=1, padx=5, pady=5)
+        ping_button = ttk.Button(ping_frame, text="Ping", command=ping_ip)
+        ping_button.grid(row=0, column=2, padx=5, pady=5)
+
+        # Initial load of network interfaces
+        load_network_interfaces()
+
+        ## STARTUP TAB ##
+        global startup_listbox
+
+        startup_tab = ttk.Frame(notebook)
+        notebook.add(startup_tab, text="Startup")
+        # Create Listbox to display startup programs
+        startup_listbox = tk.Listbox(startup_tab, height=15)
+        startup_listbox.pack(fill='x', pady=20)
+
+        # Create buttons for adding, enabling, disabling, and removing programs
+        add_button = ttk.Button(startup_tab, text="Add Program", command=add_program_to_startup)
+        add_button.pack(side=tk.LEFT, padx=10)
+
+        enable_button = ttk.Button(startup_tab, text="Enable Program", command=enable_program)
+        enable_button.pack(side=tk.LEFT, padx=10)
+
+        disable_button = ttk.Button(startup_tab, text="Disable Program", command=disable_program)
+        disable_button.pack(side=tk.LEFT, padx=10)
+
+        remove_button = ttk.Button(startup_tab, text="Remove Program", command=remove_program_from_startup)
+        remove_button.pack(side=tk.LEFT, padx=10)
+
+        # Initial load of startup programs
+        refresh_startup_list()
+
         ## ABOUT TAB ##
         notebook.add(about_tab, text="About")
 
@@ -910,6 +1459,13 @@ PATH Extensions: {os.environ.get("pathext")}""")
 
         twitter_button = ttk.Button(about_tab, text="Twitter", command=open_twitter)
         twitter_button.pack(side=tk.BOTTOM, padx=20, pady=20)
+
+        # Bind Shift + F10 key press to open command prompt
+        window.bind("<Shift-F10>", on_shift_f10)
+        
+        # Bind Shift key press and release to change window title
+        window.bind("<ShiftPress>", window.title("Porkspatch (Press Shift+F10 to open Command Prompt)"))
+        window.bind("<ShiftRelease>", window.title("Porkspatch"))
 
         # Start the main event loop
         window.mainloop()
